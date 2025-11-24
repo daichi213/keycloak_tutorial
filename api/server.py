@@ -8,11 +8,8 @@ app = Flask(__name__)
 # ブラウザからはlocalhostだが、コンテナ間通信なのでサービス名(keycloak)を使用
 KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://keycloak:8080")
 REALM_NAME = os.environ.get("REALM_NAME", "demo-realm")
-
-# イントロスペクションにはConfidential ClientのCredentialsが必要です
 CLIENT_ID = "demo-client"
-# ★重要: Keycloak管理コンソールで demo-client の Credentials タブから Secret をコピーして設定してください
-CLIENT_SECRET = "YOUR_CLIENT_SECRET_HERE"
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "") # ★設定済みのSecret
 
 INTROSPECT_URL = f"{KEYCLOAK_URL}/realms/{REALM_NAME}/protocol/openid-connect/token/introspect"
 
@@ -24,12 +21,17 @@ def introspect_token(access_token):
         'client_id': CLIENT_ID,
         'client_secret': CLIENT_SECRET,
         'token': access_token,
-        # オプション: 'token_type_hint': 'access_token'
+    }
+    
+    # ★ここが修正ポイント★
+    # Hostヘッダーを強制的に 'localhost:8080' に設定し、Issuerの一貫性を保つ
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Host': 'localhost:8080'
     }
     
     try:
-        # KeycloakへPOSTリクエスト
-        response = requests.post(INTROSPECT_URL, data=payload, timeout=5)
+        response = requests.post(INTROSPECT_URL, data=payload, headers=headers, timeout=5)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
