@@ -26,8 +26,7 @@ def introspect_token(access_token):
     # ★ここが修正ポイント★
     # Hostヘッダーを強制的に 'localhost:8080' に設定し、Issuerの一貫性を保つ
     headers = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Host': 'localhost:8080'
+        'Content-Type': 'application/x-www-form-urlencoded'
     }
     
     try:

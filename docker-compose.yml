@@ -34,7 +34,7 @@ services:
       KC_DB_PASSWORD: password
       # ▼▼▼ 追加・修正箇所 ▼▼▼
       # Keycloakの公開URLを固定し、発行者(iss)を "http://localhost:8080..." に統一する
-      KC_HOSTNAME_URL: http://localhost:8080
+      KC_HOSTNAME_URL: http://keycloak:8080
       # コンテナ間通信(http://keycloak:8080)でのアクセスも許可するため、Strictモードを無効化
       KC_HOSTNAME_STRICT: "false"
       KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
@@ -60,7 +60,7 @@ services:
       REALM_NAME: "demo-realm"
       CLIENT_ID: "demo-client"
       # 【重要】Keycloak設定後に書き換える箇所
-      CLIENT_SECRET: "CHANGE_ME_AFTER_SETUP"
+      CLIENT_SECRET: "bABIT6UsHLd1TjwXzsx5YXmbEoaboZl1"
     depends_on:
       - keycloak
     networks:
