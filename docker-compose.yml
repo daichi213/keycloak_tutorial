@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # 1. データベース (Keycloak用)
   postgres:
     image: postgres:15
     container_name: keycloak_postgres
@@ -15,7 +16,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - keycloak-net
 
+  # 2. Keycloak (IdP)
   keycloak:
     image: quay.io/keycloak/keycloak:latest
     container_name: keycloak
@@ -23,7 +27,7 @@ services:
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
-      # データベース接続設定
+      # DB設定
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres/keycloak
       KC_DB_USERNAME: keycloak
@@ -33,3 +37,27 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - keycloak-net
+
+  # 3. API Server (Resource Server)
+  api:
+    build: ./api
+    container_name: python_api
+    ports:
+      - "5000:5000"
+    environment:
+      # コンテナ内からKeycloakへの通信URL
+      KEYCLOAK_URL: "http://keycloak:8080"
+      REALM_NAME: "demo-realm"
+      CLIENT_ID: "demo-client"
+      # 【重要】Keycloak設定後に書き換える箇所
+      CLIENT_SECRET: "CHANGE_ME_AFTER_SETUP"
+    depends_on:
+      - keycloak
+    networks:
+      - keycloak-net
+
+networks:
+  keycloak-net:
+    driver: bridge
