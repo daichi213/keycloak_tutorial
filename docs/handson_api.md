@@ -1,173 +1,31 @@
-# Keycloak + APIサーバー (Python) 完全コンテナ化ハンズオン
+- [【Phase 1 改訂版】 イントロスペクション方式によるAPI保護](#phase-1-改訂版-イントロスペクション方式によるapi保護)
+  - [🎯 学習目標 (Revised)](#-学習目標-revised)
+  - [🛠 1. 環境設定の修正 (`docker-compose.yml`)](#-1-環境設定の修正-docker-composeyml)
+  - [🛠 2. APIサーバーの実装 (`api/server.py`)](#-2-apiサーバーの実装-apiserverpy)
+  - [🚀 3. 実践ステップ (検証フロー)](#-3-実践ステップ-検証フロー)
+- [💡 今回の学びポイント: Client Credentials Flow と Issuer の整合性](#-今回の学びポイント-client-credentials-flow-と-issuer-の整合性)
+  - [1. どこでエラーが起きていたか？ (再確認)](#1-どこでエラーが起きていたか-再確認)
+  - [2. なぜ今回の修正が "Prod-Ready" なのか？](#2-なぜ今回の修正が-prod-ready-なのか)
+  - [3. 他社サービスとの比較 (Industry Mapping)](#3-他社サービスとの比較-industry-mapping)
 
-## 1\. 概要
 
-本ハンズオンでは、Docker Composeを使用して以下の3つのコンテナを立ち上げ、OAuth 2.0 / OIDC によるAPI保護のフローを体験します。
+# 【Phase 1 改訂版】 イントロスペクション方式によるAPI保護
 
-1.  **PostgreSQL**: Keycloakのデータを永続化するデータベース。
-2.  **Keycloak**: 認証認可サーバー (IdP)。
-3.  **API Server**: Python (Flask) で作成した簡易Webサーバー。Keycloakにトークンの検証 (Introspection) を依頼し、アクセス制御を行います。
+## 🎯 学習目標 (Revised)
 
-## 2\. ディレクトリ構成
+  * **OAuth 2.0 Token Introspection (RFC 7662)**: APIサーバーが「不透明なトークン」を認可サーバーに問い合わせて検証する。
+  * **Issuerの一貫性**: トークンの発行者（`iss`）と、検証時の認可サーバーの認識を一致させる重要性を学ぶ。
+  * **Production-Ready Code**: APIサーバーのコードに環境依存のハックを含めず、構成（Configuration）とリクエストヘッダーで環境差異を吸収する。
 
-作業用のフォルダ（例: `keycloak-handson`）を作成し、以下の構成でファイルを作成します。
+## 🛠 1. 環境設定の修正 (`docker-compose.yml`)
 
-```text
-keycloak-handson/
-├── api/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── server.py
-└── docker-compose.yml
-```
+前回、トラブルシュートのために追加した `KC_HOSTNAME_URL` 設定は、今回の「Hostヘッダーで制御する」方針では邪魔になります（これがあると、Hostヘッダーを無視してURLを固定してしまうため）。
 
------
+**設定を「動的な解決（Strictモード無効）」の状態に戻します。**
 
-## 3\. ファイルの作成
-
-### 3-1. APIサーバー用ファイルの作成 (`api/` フォルダ内)
-
-まず `api` ディレクトリを作成し、その中に3つのファイルを作成します。
-
-**① `api/requirements.txt`**
-Pythonのライブラリ定義ファイルです。
-
-```text
-flask
-requests
-```
-
-**② `api/Dockerfile`**
-APIサーバーのコンテナ定義です。
-
-```dockerfile
-FROM python:3.9-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY server.py .
-
-# コンテナ外からアクセスできるようにポート5000を開放
-EXPOSE 5000
-
-CMD ["python", "server.py"]
-```
-
-**③ `api/server.py`**
-APIサーバーのソースコードです。環境変数経由で設定を読み込むように実装されています。
-
-```python
-from flask import Flask, request, jsonify
-import requests
-import os
-import sys
-
-app = Flask(__name__)
-
-# --- 設定 (環境変数から読み込み、デフォルトはDocker内部通信用) ---
-# Docker内ではサービス名 "keycloak" でアクセスします
-KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://keycloak:8080")
-REALM_NAME = os.getenv("REALM_NAME", "demo-realm")
-CLIENT_ID = os.getenv("CLIENT_ID", "demo-client")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
-
-if not CLIENT_SECRET:
-    print("WARNING: CLIENT_SECRET is not set. Token introspection will fail.")
-
-# イントロスペクションエンドポイント（トークン検証用URL）
-INTROSPECT_URL = f"{KEYCLOAK_URL}/realms/{REALM_NAME}/protocol/openid-connect/token/introspect"
-
-def verify_token_via_introspection(token):
-    """Keycloakにトークンを送信して有効性を確認する"""
-    payload = {
-        'client_id': CLIENT_ID,
-        'client_secret': CLIENT_SECRET,
-        'token': token
-    }
-    try:
-        # Keycloakに問い合わせ
-        response = requests.post(INTROSPECT_URL, data=payload)
-        response.raise_for_status()
-        token_info = response.json()
-        
-        # active: true なら有効
-        return token_info.get('active', False), token_info
-    except Exception as e:
-        print(f"Token validation error: {e}", file=sys.stderr)
-        return False, {}
-
-@app.route('/api/public', methods=['GET'])
-def public_endpoint():
-    """誰でもアクセスできるエンドポイント"""
-    return jsonify({"message": "Public content: Accessible by anyone.", "status": "public"})
-
-@app.route('/api/private', methods=['GET'])
-def private_endpoint():
-    """アクセストークンがないと見られないエンドポイント"""
-    
-    # 1. Authorizationヘッダーの取得
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"error": "Authorization header missing"}), 401
-
-    # 2. "Bearer <token>" 形式からトークン部分を抽出
-    parts = auth_header.split()
-    if parts[0].lower() != 'bearer' or len(parts) != 2:
-        return jsonify({"error": "Invalid header format"}), 401
-    
-    token = parts[1]
-
-    # 3. Keycloakでトークン検証
-    is_valid, token_info = verify_token_via_introspection(token)
-
-    if not is_valid:
-        return jsonify({"error": "Invalid or expired token"}), 401
-
-    # 4. 成功時のレスポンス
-    user = token_info.get('preferred_username', 'unknown')
-    return jsonify({
-        "message": f"Hello, {user}! You are authorized.",
-        "status": "protected",
-        "user_id": token_info.get('sub')
-    })
-
-if __name__ == '__main__':
-    # 外部公開用に 0.0.0.0 でリッスン
-    app.run(host='0.0.0.0', port=5000)
-```
-
-### 3-2. コンテナ構成定義ファイルの作成
-
-ルートディレクトリに `docker-compose.yml` を作成します。
-
-**`docker-compose.yml`**
-※ `api` サービスの `CLIENT_SECRET` は、後ほどKeycloakの設定後に書き換えて再起動します。
+`docker-compose.yml` の `keycloak` サービス部分を以下のように修正してください（`KC_HOSTNAME_URL` を削除します）。
 
 ```yaml
-version: '3.8'
-
-services:
-  # 1. データベース (Keycloak用)
-  postgres:
-    image: postgres:15
-    container_name: keycloak_postgres
-    volumes:
-      - ./data/postgres:/var/lib/postgresql/data
-    environment:
-      POSTGRES_DB: keycloak
-      POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: password
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U keycloak"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - keycloak-net
-
   # 2. Keycloak (IdP)
   keycloak:
     image: quay.io/keycloak/keycloak:latest
@@ -176,11 +34,15 @@ services:
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
-      # DB設定
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres/keycloak
       KC_DB_USERNAME: keycloak
       KC_DB_PASSWORD: password
+      # ▼▼▼ 修正箇所: 固定URL設定を削除し、Strictモードのみ無効化 ▼▼▼
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
+      # KC_HOSTNAME_URL: ... (削除)
+      # ▲▲▲ 修正箇所 ▲▲▲
     ports:
       - "8080:8080"
     depends_on:
@@ -188,206 +50,161 @@ services:
         condition: service_healthy
     networks:
       - keycloak-net
+```
 
-  # 3. API Server (Resource Server)
-  api:
-    build: ./api
-    container_name: python_api
-    ports:
-      - "5000:5000"
-    environment:
-      # コンテナ内からKeycloakへの通信URL
-      KEYCLOAK_URL: "http://keycloak:8080"
-      REALM_NAME: "demo-realm"
-      CLIENT_ID: "demo-client"
-      # 【重要】Keycloak設定後に書き換える箇所
-      CLIENT_SECRET: "CHANGE_ME_AFTER_SETUP"
-    depends_on:
-      - keycloak
-    networks:
-      - keycloak-net
+## 🛠 2. APIサーバーの実装 (`api/server.py`)
 
-networks:
-  keycloak-net:
-    driver: bridge
+APIサーバーのコードから、前回追加した `headers={'Host': 'localhost:8080'}` というハックを削除し、標準的な実装に戻します。
+
+```python
+from flask import Flask, request, jsonify
+import requests
+import os
+
+app = Flask(__name__)
+
+# Docker内部通信用URL
+KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://keycloak:8080")
+REALM_NAME = os.environ.get("REALM_NAME", "demo-realm")
+CLIENT_ID = "demo-client"
+# 環境変数からSecretを取得（なければ空文字）
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "") 
+
+INTROSPECT_URL = f"{KEYCLOAK_URL}/realms/{REALM_NAME}/protocol/openid-connect/token/introspect"
+
+def introspect_token(access_token):
+    """
+    RFC 7662 に基づく標準的なイントロスペクションリクエスト
+    """
+    payload = {
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'token': access_token,
+    }
+    
+    try:
+        # ★修正: 特殊なヘッダー操作を削除。純粋なPOSTリクエストに戻す。
+        response = requests.post(INTROSPECT_URL, data=payload, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Introspection Error: {e}")
+        return {'active': False}
+
+@app.route('/secure')
+def secure():
+    auth_header = request.headers.get('Authorization', None)
+    if not auth_header:
+        return jsonify({"error": "Missing Authorization Header"}), 401
+
+    parts = auth_header.split()
+    if parts[0].lower() != 'bearer' or len(parts) != 2:
+        return jsonify({"error": "Invalid Header Format"}), 401
+
+    access_token = parts[1]
+
+    # イントロスペクション実行
+    token_info = introspect_token(access_token)
+
+    # active: true かどうかをチェック
+    if not token_info.get('active'):
+        return jsonify({"error": "Token is invalid or expired"}), 401
+
+    return jsonify({
+        "message": "Access Granted via Introspection!",
+        "user": token_info.get('preferred_username'),
+        "scope": token_info.get('scope'),
+        "client_id": token_info.get('client_id'),
+        "iss": token_info.get('iss') # 確認用にIssuerを表示
+    })
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
+```
+
+**反映:**
+
+```bash
+docker-compose up -d --build
 ```
 
 -----
 
-## 4\. 環境の起動とKeycloakの初期設定
+## 🚀 3. 実践ステップ (検証フロー)
 
-### 4-1. コンテナの起動
+ここがポイントです。
+トークンを取得する際、ホストマシン (`curl`) からは `localhost` に接続しますが、**「私は `keycloak:8080` にアクセスしています」** と宣言します。
 
-ターミナルで `docker-compose.yml` のあるディレクトリに移動し、以下を実行します。
-
-```bash
-docker compose up -d --build
-```
-
-  * `--build`: APIサーバーのイメージをビルドするために必要です。
-
-Keycloakが起動するまで少し待ちます（約30秒〜1分）。
-管理コンソール `http://localhost:8080/admin/` にアクセスできれば起動完了です。
-
-### 4-2. Keycloakの設定 (GUI操作)
-
-ブラウザで `http://localhost:8080/admin/` にアクセスし、`admin` / `admin` でログインします。
-
-1.  **レルムの作成**:
-      * 左上のプルダウンから **[Create Realm]**。
-      * Realm name: `demo-realm` -\> [Create]。
-2.  **クライアントの作成**:
-      * Clients -\> **[Create client]**。
-      * Client ID: `demo-client` -\> [Next]。
-      * **Capability config**:
-          * Client authentication: **On** (必須)
-          * Authentication flow: `Standard flow` (On), `Direct access grants` (Off), `Service accounts roles` (On)。
-          * [Next]。
-      * **Login settings**:
-          * Valid redirect URIs: `http://localhost:9999` (ポート9999を指定)
-          * Web origins: `*` (念のため)
-          * [Save]。
-3.  **ユーザーの作成**:
-      * Users -\> **[Add user]**。
-      * Username: `user1` -\> [Create]。
-      * Credentials -\> [Set password] -\> `password` (Temporary: Off) -\> [Save]。
-4.  **Client Secret の取得**:
-      * Clients -\> `demo-client` -\> **Credentials** タブ。
-      * **Client Secret** の値をコピーします。
-
------
-
-## 5\. APIサーバーへのシークレット設定と再起動
-
-APIサーバーがKeycloakと会話できるように、取得したシークレットを設定ファイルに反映させます。
-
-1.  エディタで `docker-compose.yml` を開きます。
-2.  `api` サービスの `environment` セクションにある `CLIENT_SECRET` を書き換えます。
-
-<!-- end list -->
-
-```yaml
-    environment:
-      KEYCLOAK_URL: "http://keycloak:8080"
-      REALM_NAME: "demo-realm"
-      CLIENT_ID: "demo-client"
-      # ↓ ここにコピーした値を貼り付け
-      CLIENT_SECRET: "ここにコピーしたシークレットを貼り付け" 
-```
-
-3.  設定を反映させるため、コンテナを再作成します。
-
-<!-- end list -->
+**Step 1: アクセストークンの取得 (Hostヘッダー指定)**
 
 ```bash
-docker compose up -d api
+# トークンを取得
+# -H "Host: keycloak:8080" を追加することで、発行されるトークンの iss を "http://keycloak:8080..." にする
+export TOKEN=$(curl -s -X POST 'http://localhost:8080/realms/demo-realm/protocol/openid-connect/token' \
+  -H 'Host: keycloak:8080' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'client_id=demo-client' \
+  -d 'client_secret=bABIT6UsHLd1TjwXzsx5YXmbEoaboZl1' \
+  -d 'grant_type=client_credentials' | jq -r .access_token)
+
+# トークンが取れたか確認
+echo $TOKEN
 ```
 
-※ `api` コンテナだけが再起動されます。Keycloakはそのまま動いています。
+> ※ `client_secret` はご自身の環境の値に合わせてください。
 
------
-
-## 6\. ハンズオン実行
-
-ここからはターミナルで `curl` コマンドを使って動作確認します。
-
-### 変数の準備
+**Step 2: APIサーバーへアクセス**
 
 ```bash
-export KEYCLOAK_URL="http://localhost:8080"
-export REALM_NAME="demo-realm"
-export CLIENT_ID="demo-client"
-# docker-compose.ymlに貼ったものと同じ値を設定
-export CLIENT_SECRET="ここにコピーしたシークレット"
+curl http://localhost:5000/secure \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-### Step 1: 公開APIへのアクセス（認証不要）
-
-まずは何も持たずにAPIサーバーにアクセスしてみます。
-
-```bash
-curl http://localhost:5000/api/public
-```
-
-  * **結果**: `{"message": "Public content...", "status": "public"}` が返ればOKです。
-
-### Step 2: 保護APIへのアクセス（失敗確認）
-
-トークン無しで保護されたAPIにアクセスします。
-
-```bash
-curl http://localhost:5000/api/private
-```
-
-  * **結果**: `{"error": "Authorization header missing"}` (401エラー) が返ります。
-
-### Step 3: トークンの取得 (Authorization Code Flow)
-
-**1. 認可コードの取得 (ブラウザ)**
-以下のURLにブラウザでアクセスします。
-
-```text
-http://localhost:8080/realms/demo-realm/protocol/openid-connect/auth?client_id=demo-client&response_type=code&redirect_uri=http://localhost:9999&scope=openid
-```
-
-  * ログイン後、接続エラー画面になります。
-  * アドレスバーの `code=...` の値をコピーします。
-
-**2. アクセストークンへの交換 (ターミナル)**
-
-```bash
-export AUTH_CODE="ブラウザからコピーしたコード"
-
-curl -X POST "$KEYCLOAK_URL/realms/$REALM_NAME/protocol/openid-connect/token" \
- -H "Content-Type: application/x-www-form-urlencoded" \
- -d "grant_type=authorization_code" \
- -d "client_id=$CLIENT_ID" \
- -d "client_secret=$CLIENT_SECRET" \
- -d "redirect_uri=http://localhost:9999" \
- -d "code=$AUTH_CODE" | jq .
-```
-
-  * 返ってきたJSONの中の `access_token` をコピーします。
-
-<!-- end list -->
-
-```bash
-export ACCESS_TOKEN="取得したアクセストークン"
-```
-
-### Step 4: 保護APIへのアクセス（成功確認）
-
-取得したトークンを使って、再度APIにアクセスします。
-APIサーバー（コンテナ）は、裏側でKeycloak（コンテナ）と通信し、トークンが正しいかを確認します。
-
-```bash
-curl -H "Authorization: Bearer $ACCESS_TOKEN" http://localhost:5000/api/private
-```
-
-  * **成功時の結果**:
-
-<!-- end list -->
+**成功時のレスポンス例:**
 
 ```json
 {
-  "message": "Hello, user1! You are authorized.",
-  "status": "protected",
-  "user_id": "..."
+  "client_id": "demo-client",
+  "iss": "http://keycloak:8080/realms/demo-realm", 
+  "message": "Access Granted via Introspection!",
+  "scope": "email profile",
+  "user": "service-account-demo-client"
 }
 ```
 
-これで、すべてのコンポーネント（DB、IdP、API）がDockerコンテナ上で連携し、正しくAPI保護が機能していることが確認できました。
+`iss` が `http://keycloak:8080...` となっており、APIサーバー内部から見たKeycloakのURLと一致しているため、検証が成功します。
 
 -----
 
-## 7\. 環境の削除
+# 💡 今回の学びポイント: Client Credentials Flow と Issuer の整合性
 
-ハンズオン終了後、環境を完全に削除するには以下を実行します。
+今回のエラーとその解決策は、**「認証基盤における "名前（Identity）" の管理」** という本質的なテーマを含んでいます。
 
-```bash
-# コンテナの停止と削除
-docker compose down
+## 1\. どこでエラーが起きていたか？ (再確認)
 
-# データも削除する場合
-rm -rf ./data
-```
+  * **Client Credentials Flow**: マシン間通信（M2M）で使われるフローです。
+  * **Keycloakの検証ロジック**:
+      * イントロスペクションのエンドポイント (`POST /token/introspect`) は、受け取ったトークンを発行したのが「自分自身かどうか」を確認します。
+      * この際、「現在の自分へのリクエストURL（Hostヘッダー）」と「トークン内の `iss` クレーム」を比較します。
+
+## 2\. なぜ今回の修正が "Prod-Ready" なのか？
+
+前回の修正案（APIコード内でヘッダーを書き換える）は、アプリケーションコードに「インフラ構成の事情（Dockerのネットワーク名）」が漏れ出していました。これは密結合であり、環境が変わる（例: Kubernetesに移行する）と動かなくなります。
+
+**今回の修正（クライアント側でHostヘッダーを指定）が優れている理由:**
+
+  * **Resource Server (API) の責務分離**: APIサーバーは「来たトークンを検証先に投げる」という標準的な動作のみを行っており、環境依存がありません。
+  * **リバースプロキシのシミュレーション**: 本番環境では、Load Balancerやリバースプロキシが `Host` ヘッダーを制御します（例: ユーザーは `api.example.com` にアクセスするが、バックエンドのKeycloakには `Host: auth.example.com` としてルーティングするなど）。
+  * 今回の `curl -H "Host: keycloak:8080"` は、本番環境における「正しく構成されたクライアント、またはGateway」の挙動をシミュレートしています。
+
+## 3\. 他社サービスとの比較 (Industry Mapping)
+
+| 概念 | Keycloak (Self-hosted) | AWS Cognito | Okta / Auth0 |
+| :--- | :--- | :--- | :--- |
+| **Issuer (iss)** | 設定 (`KC_HOSTNAME`) やリクエストヘッダー (`Host`) で変動しうる。**設計が必要。** | `https://cognito-idp.{region}.amazonaws.com/{pool_id}` で固定。変動しない。 | `https://{your-org}.okta.com` で固定。カスタムドメインも設定可。 |
+| **Introspection** | 標準サポート (RFC 7662)。セッション破棄を即時検知できる。 | 非対応 (標準機能としては提供なし)。トークンの有効期限切れを待つか、独自実装が必要。 | 標準サポート。 |
+| **Client Credentials** | Service Account機能として実装。 | User PoolのApp Client設定で有効化。 | M2M Applicationとして実装。 |
+
+**結論:**
+マネージドサービス（Cognito/Okta）は `iss` が固定されているため、このようなトラブルは起きにくいです。
+しかし、Keycloakのようなセルフホスト型IAMでは、**「誰が（どのホスト名が）正当なIssuerなのか」** をインフラ設計段階で決めておく必要があります。今回のハンズオンは、その「Issuer設計の重要性」を学ぶ良い機会となりました。

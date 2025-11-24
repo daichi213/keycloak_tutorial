@@ -9,13 +9,14 @@ app = Flask(__name__)
 KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://keycloak:8080")
 REALM_NAME = os.environ.get("REALM_NAME", "demo-realm")
 CLIENT_ID = "demo-client"
-CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "") # ★設定済みのSecret
+# 環境変数からSecretを取得（なければ空文字）
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "") 
 
 INTROSPECT_URL = f"{KEYCLOAK_URL}/realms/{REALM_NAME}/protocol/openid-connect/token/introspect"
 
 def introspect_token(access_token):
     """
-    Keycloakのイントロスペクションエンドポイントを叩いてトークンを検証する
+    RFC 7662 に基づく標準的なイントロスペクションリクエスト
     """
     payload = {
         'client_id': CLIENT_ID,
@@ -23,14 +24,9 @@ def introspect_token(access_token):
         'token': access_token,
     }
     
-    # ★ここが修正ポイント★
-    # Hostヘッダーを強制的に 'localhost:8080' に設定し、Issuerの一貫性を保つ
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }
-    
     try:
-        response = requests.post(INTROSPECT_URL, data=payload, headers=headers, timeout=5)
+        # ★修正: 特殊なヘッダー操作を削除。純粋なPOSTリクエストに戻す。
+        response = requests.post(INTROSPECT_URL, data=payload, timeout=5)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -71,7 +67,8 @@ def secure():
         "message": "Access Granted via Introspection!",
         "user": token_info.get('preferred_username'),
         "scope": token_info.get('scope'),
-        "client_id": token_info.get('client_id') # 誰のために発行されたか
+        "client_id": token_info.get('client_id'),
+        "iss": token_info.get('iss') # 確認用にIssuerを表示
     })
 
 if __name__ == '__main__':
